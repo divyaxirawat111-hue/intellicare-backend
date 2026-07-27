@@ -3,6 +3,7 @@ const { body, query, param } = require('express-validator');
 const { authenticateToken } = require('../middleware/auth');
 const { requireRole } = require('../middleware/rbac');
 const { createNote, listNotes, getNote } = require('../controllers/noteController');
+const { cacheMiddleware } = require('../middleware/cache');
 
 const router = express.Router();
 
@@ -58,6 +59,37 @@ router.get(
   '/:noteId',
   authenticateToken,
   requireRole('clinician', 'admin'),
+  [
+    param('noteId')
+      .notEmpty().withMessage('noteId is required.'),
+  ],
+  getNote
+);
+// ── GET /api/notes ───────────────────────────────────────────────────────────
+router.get(
+  '/',
+  authenticateToken,
+  requireRole('clinician', 'admin'),
+  cacheMiddleware,
+  [
+    query('patientId')
+      .notEmpty().withMessage('patientId query parameter is required.'),
+    query('page')
+      .optional()
+      .isInt({ min: 1 }).withMessage('page must be a positive integer.'),
+    query('limit')
+      .optional()
+      .isInt({ min: 1, max: 100 }).withMessage('limit must be between 1 and 100.'),
+  ],
+  listNotes
+);
+
+// ── GET /api/notes/:noteId ───────────────────────────────────────────────────
+router.get(
+  '/:noteId',
+  authenticateToken,
+  requireRole('clinician', 'admin'),
+  cacheMiddleware,
   [
     param('noteId')
       .notEmpty().withMessage('noteId is required.'),
