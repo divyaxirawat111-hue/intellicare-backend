@@ -44,6 +44,12 @@ const noteSchema = new mongoose.Schema(
   }
 );
 
+// Indexes for fast lookups when fetching notes by clinician or patient
+noteSchema.index({ clinicianId: 1 });
+noteSchema.index({ patientId: 1 });
+// Compound index: speeds up queries that filter by both clinician and appointment
+noteSchema.index({ clinicianId: 1, appointmentId: 1 });
+
 // After 24 hours, mark the note as no longer editable.
 // This is checked in the controller before allowing edits.
 noteSchema.methods.checkEditWindow = function () {
