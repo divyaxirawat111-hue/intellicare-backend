@@ -4,6 +4,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const compression = require('compression');
+const client = require('prom-client');
 require('dotenv').config();
 
 const noteRoutes = require('./routes/noteRoutes');
@@ -11,32 +12,58 @@ const authRoutes = require('./routes/authRoutes');
 
 const app = express();
 
+// ── MONITORING SETUP (Stage 7): Prometheus metrics ───────────────────────────
+// Collects default Node.js process metrics (CPU, memory, event loop lag, etc.)
+// every 10 seconds, plus custom HTTP request duration and error counters.
+const register = new client.Registry();
+client.collectDefaultMetrics({ register });
+
+const httpRequestDuration = new client.Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'Duration of HTTP requests in seconds',
+  labelNames: ['method', 'route', 'status_code'],
+  buckets: [0.05, 0.1, 0.3, 0.5, 1, 2, 5, 10],
+});
+register.registerMetric(httpRequestDuration);
+
+const httpRequestErrors = new client.Counter({
+  name: 'http_request_errors_total',
+  help: 'Total number of HTTP requests that resulted in an error (4xx/5xx)',
+  labelNames: ['method', 'route', 'status_code'],
+});
+register.registerMetric(httpRequestErrors);
+
+// Middleware: times every request and records it against the histogram above
+app.use((req, res, next) => {
+  const end = httpRequestDuration.startTimer();
+  res.on('finish', () => {
+    const route = req.route ? req.baseUrl + req.route.path : req.path;
+    end({ method: req.method, route, status_code: res.statusCode });
+    if (res.statusCode >= 400) {
+      httpRequestErrors.inc({ method: req.method, route, status_code: res.statusCode });
+    }
+  });
+  next();
+});
+
 // ── Security middleware ──────────────────────────────────────────────────────
 app.use(helmet());
 
 // ── OPTIMIZATION 1 (Client-side): Response compression (gzip) ────────────────
-// Reduces response payload size by 70-90% for clients that support gzip.
-// Improves perceived latency and reduces bandwidth costs on the client.
 app.use(compression({
-  level: 6,           // balance between speed and compression ratio
-  threshold: 1024,    // only compress responses larger than 1KB
+  level: 6,
+  threshold: 1024,
 }));
 
 // ── SECURITY FIX #1: Restrict CORS to trusted origins only ───────────────────
-// Previously fell back to '*' whenever FRONTEND_URL was unset, allowing ANY
-// website to make cross-origin requests to this API (flagged by OWASP ZAP as
-// a Medium-severity Cross-Domain Misconfiguration). For a healthcare app
-// handling clinical notes, this could allow malicious sites to read patient
-// data via a logged-in user's browser. Now restricted to an explicit allowlist.
 const allowedOrigins = [
-  process.env.FRONTEND_URL,   // production frontend, once deployed
-  'http://localhost:3000',    // local dev (Create React App default)
-  'http://localhost:5173',    // local dev (Vite default)
-].filter(Boolean); // removes undefined if FRONTEND_URL isn't set
+  process.env.FRONTEND_URL,
+  'http://localhost:3000',
+  'http://localhost:5173',
+].filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
-    // allow requests with no origin (e.g. Postman, curl, server-to-server)
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -69,11 +96,15 @@ mongoose
 app.use('/api/auth', authRoutes);
 app.use('/api/notes', noteRoutes);
 
+// ── Prometheus metrics endpoint ───────────────────────────────────────────────
+// Prometheus scrapes this URL periodically to collect CPU, memory, and
+// request-level metrics for the Grafana dashboard.
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', register.contentType);
+  res.end(await register.metrics());
+});
+
 // ── Health check with client-side caching ────────────────────────────────────
-// OPTIMIZATION 2 (Client-side): HTTP Cache-Control headers tell the client
-// (browser, proxy, mobile app) to reuse the cached response for 60 seconds
-// instead of hitting the network again. Vary header ensures gzip vs non-gzip
-// responses are cached separately.
 app.get('/', (req, res) => {
   res.set('Cache-Control', 'public, max-age=60, s-maxage=60');
   res.set('Vary', 'Accept-Encoding');
