@@ -22,10 +22,30 @@ app.use(compression({
   threshold: 1024,    // only compress responses larger than 1KB
 }));
 
+// ── SECURITY FIX #1: Restrict CORS to trusted origins only ───────────────────
+// Previously fell back to '*' whenever FRONTEND_URL was unset, allowing ANY
+// website to make cross-origin requests to this API (flagged by OWASP ZAP as
+// a Medium-severity Cross-Domain Misconfiguration). For a healthcare app
+// handling clinical notes, this could allow malicious sites to read patient
+// data via a logged-in user's browser. Now restricted to an explicit allowlist.
+const allowedOrigins = [
+  process.env.FRONTEND_URL,   // production frontend, once deployed
+  'http://localhost:3000',    // local dev (Create React App default)
+  'http://localhost:5173',    // local dev (Vite default)
+].filter(Boolean); // removes undefined if FRONTEND_URL isn't set
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
+  origin: function (origin, callback) {
+    // allow requests with no origin (e.g. Postman, curl, server-to-server)
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
 }));
 
 // ── General rate limiter (200 req / 15 min per IP) ───────────────────────────
