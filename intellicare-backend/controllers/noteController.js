@@ -1,5 +1,16 @@
 const { validationResult } = require('express-validator');
+const mongoose = require('mongoose');
 const Note = require('../models/Note');
+
+// ── SECURITY FIX #2: Guard against NoSQL injection ───────────────────────────
+// Query/route parameters must be plain strings before being used in a Mongo
+// filter. Without this check, a malicious request like
+// ?patientId[$ne]=null gets parsed by Express into an object
+// ({ $ne: null }) instead of a string, letting an attacker bypass the
+// intended filter and pull back notes for ALL patients instead of one.
+// This addresses OWASP API Security Top 10 - API3:2023 (Broken Object
+// Property Level Authorization / Injection).
+const isPlainString = (value) => typeof value === 'string';
 
 // ── POST /api/notes ──────────────────────────────────────────────────────────
 // Creates a new clinical note for a patient and appointment.
@@ -16,6 +27,14 @@ const createNote = async (req, res) => {
 
   const { patientId, appointmentId, content, noteType } = req.body;
   const clinicianId = req.user.userId; // pulled from the verified JWT
+
+  // Reject non-string identifiers (defense-in-depth against injection)
+  if (!isPlainString(patientId) || !isPlainString(appointmentId)) {
+    return res.status(400).json({
+      success: false,
+      message: 'patientId and appointmentId must be plain strings.',
+    });
+  }
 
   try {
     const note = new Note({
@@ -64,6 +83,16 @@ const listNotes = async (req, res) => {
   }
 
   const { patientId, appointmentId } = req.query;
+
+  // SECURITY FIX #2: reject non-string query params before they ever
+  // reach the MongoDB filter (prevents operator injection e.g. $ne, $gt)
+  if (!isPlainString(patientId) || (appointmentId && !isPlainString(appointmentId))) {
+    return res.status(400).json({
+      success: false,
+      message: 'patientId and appointmentId must be plain strings.',
+    });
+  }
+
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 10;
   const skip = (page - 1) * limit;
@@ -118,8 +147,20 @@ const listNotes = async (req, res) => {
 // ── GET /api/notes/:noteId ───────────────────────────────────────────────────
 // Returns the full content of a single note.
 const getNote = async (req, res) => {
+  const { noteId } = req.params;
+
+  // SECURITY FIX #2 (related): validate noteId is a real MongoDB ObjectId
+  // before querying. Prevents CastErrors from leaking stack traces and
+  // blocks malformed/malicious IDs from reaching the database layer.
+  if (!mongoose.Types.ObjectId.isValid(noteId)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid noteId format.',
+    });
+  }
+
   try {
-    const note = await Note.findById(req.params.noteId).select('-__v');
+    const note = await Note.findById(noteId).select('-__v');
 
     if (!note) {
       return res.status(404).json({
